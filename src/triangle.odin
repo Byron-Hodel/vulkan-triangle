@@ -23,6 +23,11 @@ Vulkan_Data :: struct {
     }
 }
 
+Vulkan_Window_Data :: struct {
+    window: glfw.WindowHandle,
+    surface: vk.SurfaceKHR,
+}
+
 Swapchain :: struct {
     handle: vk.SwapchainKHR,
 }
@@ -263,7 +268,24 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         vk.DestroyDevice(device, nil)
     }
 
-    vk_data.instance = instance
-    vk_data.device   = device
-    return false 
+    vk_data.instance         = instance
+    vk_data.device           = device
+    vk_data.indices.graphics = transmute(u32)graphics_index
+    vk_data.indices.compute  = transmute(u32)compute_index
+    vk_data.indices.transfer = transmute(u32)transfer_index
+    return true
 }
+
+vulkan_data_destroy :: proc(data: ^Vulkan_Data) {
+    defer data^ = {}
+    vk.DestroyDevice(data.device, nil)
+    vk.DestroyInstance(data.instance, nil)
+}
+
+vulkan_swapchain_init :: proc(window: glfw.WindowHandle, swapchain: ^Swapchain) {
+}
+
+vulkan_swapchain_destroy :: proc(swapchain: ^Swapchain) {
+
+}
+

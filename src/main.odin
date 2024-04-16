@@ -26,6 +26,8 @@ main :: proc() {
         fmt.eprintln("failed to init vulkan data")
         return
     }
+    defer vulkan_data_destroy(&vk_data)
+
     fmt.println("initialized vulkan data")
 
     for !glfw.WindowShouldClose(window) {
