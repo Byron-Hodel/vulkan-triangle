@@ -16,6 +16,15 @@ DEVICE_EXTENSIONS :: 1
 Vulkan_Data :: struct {
     instance: vk.Instance,
     device:   vk.Device,
+    indices:  struct {
+        graphics: u32,
+        compute:  u32,
+        transfer: u32,
+    }
+}
+
+Swapchain :: struct {
+    handle: vk.SwapchainKHR,
 }
 
 vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
@@ -71,7 +80,10 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
     // select physical device
     physical_device: vk.PhysicalDevice
     {
-        is_physical_device_valid :: proc(d: vk.PhysicalDevice) -> b32 {
+        is_device_suitable :: proc(d: vk.PhysicalDevice, arena: ^mem.Arena) -> b32 {
+            defer restore_arena(arena, arena.offset)
+            arena_allocator := mem.arena_allocator(arena)
+
             indexing_features := vk.PhysicalDeviceDescriptorIndexingFeatures {
                 sType = .PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
             }
@@ -83,6 +95,24 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
 
             bindless_supported: b32 = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray
             
+            // check extensions
+            required_extensions: = glfw.GetRequiredInstanceExtensions()
+
+            extension_count: u32
+            vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, nil)
+            extensions := make([]vk.ExtensionProperties, extension_count, arena_allocator)
+            vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, raw_data(extensions))
+            
+            loop: for re in required_extensions {
+                for &e in extensions {
+                    if cast(cstring)cast(rawptr)&e.extensionName == re {
+                        continue loop
+                    }
+                    return false
+                }
+
+            }
+
             return bindless_supported
         }
         defer restore_arena(&arena, arena.offset)
@@ -102,7 +132,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             properties: vk.PhysicalDeviceProperties
             vk.GetPhysicalDeviceProperties(d, &properties)
 
-            if is_physical_device_valid(d) || properties.deviceType == .DISCRETE_GPU || properties.deviceType == .INTEGRATED_GPU {
+            if is_device_suitable(d, &arena) || properties.deviceType == .DISCRETE_GPU || properties.deviceType == .INTEGRATED_GPU {
                 if !has_selected_device {
                     has_selected_device = true
                     selected_device = d
@@ -122,8 +152,9 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             return
         }
         physical_device = selected_device
+
+        fmt.println("selected physical device:", cast(cstring)cast(rawptr)&selected_properties.deviceName)
     }
-    fmt.println("selected physical device")
 
     // get queue families
     queue_family_properties: []vk.QueueFamilyProperties
