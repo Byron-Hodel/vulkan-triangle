@@ -8,18 +8,22 @@ import "vendor:glfw"
 import vk "vendor:vulkan"
 
 VALIDATION_LAYERS: []cstring = {
-    //"VK_LAYER_KHRONOS_validation",
+    "VK_LAYER_KHRONOS_validation",
 }
 
-DEVICE_EXTENSIONS :: 1
+DEVICE_EXTENSIONS: []cstring = {
+    "VK_KHR_swapchain",
+}
 
 Vulkan_Data :: struct {
     instance: vk.Instance,
     device:   vk.Device,
     indices:  struct {
-        graphics: u32,
-        compute:  u32,
-        transfer: u32,
+        graphics:             u32,
+        compute:              u32,
+        transfer:             u32,
+        specialized_compute:  b8,
+        specialized_transfer: b8,
     }
 }
 
@@ -34,16 +38,13 @@ Swapchain :: struct {
 
 vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
     get_proc_address :: proc(p: rawptr, name: cstring) {
-		(cast(^rawptr)p)^ = glfw.GetInstanceProcAddress((^vk.Instance)(context.user_ptr)^, name);
+		(cast(^rawptr)p)^ = glfw.GetInstanceProcAddress((^vk.Instance)(context.user_ptr)^, name)
 	}
     arena_buffer: [4098]u8 = ---
     arena: mem.Arena
     mem.arena_init(&arena, arena_buffer[:])
     arena_allocator := mem.arena_allocator(&arena)
     // sets arena offset to some value
-    restore_arena :: proc(a: ^mem.Arena, offset: int) {
-        a.offset = offset
-    }
 
     // create vulkan instance
     instance: vk.Instance
@@ -59,13 +60,13 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             apiVersion = vk.API_VERSION_1_1,
         }
 
-        //glfw_required_extensions := glfw.GetRequiredInstanceExtensions()
+        glfw_required_extensions := glfw.GetRequiredInstanceExtensions()
 
         instance_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
             pApplicationInfo = &app_info,
-            //enabledExtensionCount = cast(u32)len(glfw_required_extensions),
-            //ppEnabledExtensionNames = raw_data(glfw_required_extensions),
+            enabledExtensionCount = cast(u32)len(glfw_required_extensions),
+            ppEnabledExtensionNames = raw_data(glfw_required_extensions),
             enabledLayerCount = cast(u32)len(VALIDATION_LAYERS),
             ppEnabledLayerNames = raw_data(VALIDATION_LAYERS),
         }
@@ -86,7 +87,6 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
     physical_device: vk.PhysicalDevice
     {
         is_device_suitable :: proc(d: vk.PhysicalDevice, arena: ^mem.Arena) -> b32 {
-            defer restore_arena(arena, arena.offset)
             arena_allocator := mem.arena_allocator(arena)
 
             indexing_features := vk.PhysicalDeviceDescriptorIndexingFeatures {
@@ -101,14 +101,13 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             bindless_supported: b32 = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray
             
             // check extensions
-            required_extensions: = glfw.GetRequiredInstanceExtensions()
-
             extension_count: u32
             vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, nil)
             extensions := make([]vk.ExtensionProperties, extension_count, arena_allocator)
+            defer delete(extensions, arena_allocator)
             vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, raw_data(extensions))
             
-            loop: for re in required_extensions {
+            loop: for re in DEVICE_EXTENSIONS {
                 for &e in extensions {
                     if cast(cstring)cast(rawptr)&e.extensionName == re {
                         continue loop
@@ -120,7 +119,6 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
 
             return bindless_supported
         }
-        defer restore_arena(&arena, arena.offset)
 
         device_count: u32
         vk.EnumeratePhysicalDevices(instance, &device_count, nil)
@@ -161,13 +159,33 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         fmt.println("selected physical device:", cast(cstring)cast(rawptr)&selected_properties.deviceName)
     }
 
-    // get queue families
-    queue_family_properties: []vk.QueueFamilyProperties
+    // get queue families and select queue family indices
+    graphics_index, compute_index, transfer_index: i32 = -1, -1, -1
+    specialized_transfer, specialized_compute: b8
     {
+        queue_family_properties: []vk.QueueFamilyProperties
         queue_family_count: u32
         vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nil)
         queue_family_properties = make([]vk.QueueFamilyProperties, queue_family_count, arena_allocator)
+        defer delete(queue_family_properties, arena_allocator)
         vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, raw_data(queue_family_properties))
+
+        for f, i in queue_family_properties {
+            if graphics_index == -1 && .GRAPHICS in f.queueFlags do graphics_index = cast(i32)i
+            if compute_index  == -1 && .COMPUTE  in f.queueFlags do compute_index  = cast(i32)i
+            if transfer_index == -1 && .TRANSFER in f.queueFlags do transfer_index = cast(i32)i
+            
+            if .TRANSFER in f.queueFlags && transmute(i32)f.queueFlags < transmute(i32)queue_family_properties[transfer_index].queueFlags {
+                transfer_index = cast(i32)i
+            }
+
+            if .COMPUTE in f.queueFlags && transmute(i32)f.queueFlags < transmute(i32)queue_family_properties[compute_index].queueFlags {
+                compute_index = cast(i32)i
+            }
+        }
+
+        specialized_compute  = compute_index  != graphics_index && compute_index  != transfer_index
+        specialized_transfer = transfer_index != graphics_index && transfer_index != compute_index
 
         for p, i in queue_family_properties {
             fmt.println("queue family:", i)
@@ -187,33 +205,10 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             else                                 do fmt.println("  Optical Flow: - N")
             fmt.println("  max queues", p.queueCount)
         }
-    }
 
-    // select queue family indices
-    graphics_index, compute_index, transfer_index: i32 = -1, -1, -1
-    graphics_unique, compute_unique, transfer_unique: b8
-    {
-        for f, i in queue_family_properties {
-            if graphics_index == -1 && .GRAPHICS in f.queueFlags do graphics_index = cast(i32)i
-            if compute_index  == -1 && .COMPUTE  in f.queueFlags do compute_index  = cast(i32)i
-            if transfer_index == -1 && .TRANSFER in f.queueFlags do transfer_index = cast(i32)i
-            
-            if .TRANSFER in f.queueFlags && transmute(i32)f.queueFlags < transmute(i32)queue_family_properties[transfer_index].queueFlags {
-                transfer_index = cast(i32)i
-            }
-
-            if .COMPUTE in f.queueFlags && transmute(i32)f.queueFlags < transmute(i32)queue_family_properties[compute_index].queueFlags {
-                compute_index = cast(i32)i
-            }
-        }
-
-        graphics_unique = graphics_index != compute_index  && graphics_index != transfer_index
-        compute_unique  = compute_index  != graphics_index && compute_index  != transfer_index
-        transfer_unique = transfer_index != graphics_index && transfer_index != compute_index
-
-        fmt.println("Graphics Family Index:", graphics_index, "is unique =", graphics_unique)
-        fmt.println("Compute Family Index: ", compute_index, "is unique =", compute_unique)
-        fmt.println("Transfer Family Index:", transfer_index, "is unique =", transfer_unique)
+        fmt.println("Selected Graphics Family Index:", graphics_index)
+        fmt.println("Selected Compute Family Index: ", compute_index)
+        fmt.println("Selected Transfer Family Index:", transfer_index)
     }
 
     // create logical device
@@ -228,7 +223,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             queueCount = 1,
             pQueuePriorities = &queue_priority,
         }
-        if compute_unique {
+        if specialized_compute {
             defer queue_info_count += 1
             queue_infos[queue_info_count] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
@@ -237,8 +232,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
                 pQueuePriorities = &queue_priority,
             }
         }
-
-        if transfer_unique {
+        if specialized_transfer {
             defer queue_info_count += 1
             queue_infos[queue_info_count] = vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
@@ -255,6 +249,8 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             sType = .DEVICE_CREATE_INFO,
             queueCreateInfoCount = queue_info_count,
             pQueueCreateInfos = raw_data(queue_infos[:queue_info_count]),
+            enabledExtensionCount = cast(u32)len(DEVICE_EXTENSIONS),
+            ppEnabledExtensionNames = raw_data(DEVICE_EXTENSIONS),
             pEnabledFeatures = &device_features,
         }
 
@@ -273,6 +269,8 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
     vk_data.indices.graphics = transmute(u32)graphics_index
     vk_data.indices.compute  = transmute(u32)compute_index
     vk_data.indices.transfer = transmute(u32)transfer_index
+    vk_data.indices.specialized_compute  = specialized_compute
+    vk_data.indices.specialized_transfer = specialized_transfer
     return true
 }
 
