@@ -1,36 +1,43 @@
 package main
 
-import "core:fmt"
+import "core:log"
 import "core:math/linalg/glsl"
 import vk "vendor:vulkan"
 import "vendor:glfw"
 
 main :: proc() {
+    context.logger = log.create_console_logger()
+    defer log.destroy_console_logger(context.logger)
+
     if !glfw.Init() {
-        fmt.eprintln("failed to init glfw")
+        log.fatal("failed to init glfw")
         return
     }
-    fmt.println("initialized glfw")
+    log.debug("initialized glfw")
     defer glfw.Terminate()
 
     window := glfw.CreateWindow(512, 512, "vulkan triangle", nil, nil)
     if window == nil {
-        fmt.eprintln("failed to create window")
+        log.fatal("failed to create window")
         return
     }
-    fmt.println("created window")
+    log.debug("created window")
     defer glfw.DestroyWindow(window)
 
     vk_data: Vulkan_Data
     if !vulkan_data_init(&vk_data) {
-        fmt.eprintln("failed to init vulkan data")
+        log.fatal("failed to init vulkan data")
         return
     }
     defer vulkan_data_destroy(&vk_data)
 
-    fmt.println("initialized vulkan data")
+    log.debug("initialized vulkan data")
+
+    log.info("initialization complete")
 
     for !glfw.WindowShouldClose(window) {
         glfw.PollEvents()
     }
+
+    log.info("program exiting normally")
 }

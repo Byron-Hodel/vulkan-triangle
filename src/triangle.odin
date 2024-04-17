@@ -1,6 +1,6 @@
 package main
 
-import "core:fmt"
+import "core:log"
 import "core:math/linalg/glsl"
 import "core:mem"
 import "core:reflect"
@@ -73,7 +73,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
 
         result := vk.CreateInstance(&instance_info, nil, &instance)
         if result != .SUCCESS {
-            fmt.eprintln("failed to create vulkan instance:", reflect.enum_string(result))
+            log.error("failed to create vulkan instance:", reflect.enum_string(result))
             return false
         }
 	    vk.load_proc_addresses(instance)
@@ -81,7 +81,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
     defer if !ok {
         vk.DestroyInstance(instance, nil)
     }
-    fmt.println("created instance")
+    log.debug("created instance")
 
     // select physical device
     physical_device: vk.PhysicalDevice
@@ -124,7 +124,8 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         vk.EnumeratePhysicalDevices(instance, &device_count, nil)
         physical_device_list := make([]vk.PhysicalDevice, device_count, arena_allocator)
         if physical_device_list == nil {
-            fmt.eprintln()
+            log.error("failed to allocate memory for physical devices")
+            return false
         }
         vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(physical_device_list))
         
@@ -150,13 +151,12 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             }
         }
         if !has_selected_device {
-            ok = false
-            fmt.eprintln("failed to find suitable physical device")
-            return
+            log.error("failed to find suitable physical device")
+            return false
         }
         physical_device = selected_device
 
-        fmt.println("selected physical device:", cast(cstring)cast(rawptr)&selected_properties.deviceName)
+        log.debug("selected physical device:", cast(cstring)cast(rawptr)&selected_properties.deviceName)
     }
 
     // get queue families and select queue family indices
@@ -188,27 +188,27 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         specialized_transfer = transfer_index != graphics_index && transfer_index != compute_index
 
         for p, i in queue_family_properties {
-            fmt.println("queue family:", i)
-            if .GRAPHICS in p.queueFlags         do fmt.println("  Graphics: ----- Y")
-            else                                 do fmt.println("  Graphics: ----- N")
-            if .COMPUTE in p.queueFlags          do fmt.println("  Compute: ------ Y")
-            else                                 do fmt.println("  Compute: ------ N")
-            if .TRANSFER in p.queueFlags         do fmt.println("  Transfer: ----- Y")
-            else                                 do fmt.println("  Compute: ------ N")
-            if .SPARSE_BINDING in p.queueFlags   do fmt.println("  Sparse Binding: Y")
-            else                                 do fmt.println("  Sparse Binding: N")
-            if .PROTECTED in p.queueFlags        do fmt.println("  Protected: ---- Y")
-            else                                 do fmt.println("  Protected: ---- N")
-            if .VIDEO_DECODE_KHR in p.queueFlags do fmt.println("  Vidio Decode: - Y")
-            else                                 do fmt.println("  Vidio Decode: - N")
-            if .OPTICAL_FLOW_NV in p.queueFlags  do fmt.println("  Optical Flow: - Y")
-            else                                 do fmt.println("  Optical Flow: - N")
-            fmt.println("  max queues", p.queueCount)
+            log.debug("queue family:", i)
+            if .GRAPHICS in p.queueFlags         do log.debug("  Graphics: ----- Y")
+            else                                 do log.debug("  Graphics: ----- N")
+            if .COMPUTE in p.queueFlags          do log.debug("  Compute: ------ Y")
+            else                                 do log.debug("  Compute: ------ N")
+            if .TRANSFER in p.queueFlags         do log.debug("  Transfer: ----- Y")
+            else                                 do log.debug("  Compute: ------ N")
+            if .SPARSE_BINDING in p.queueFlags   do log.debug("  Sparse Binding: Y")
+            else                                 do log.debug("  Sparse Binding: N")
+            if .PROTECTED in p.queueFlags        do log.debug("  Protected: ---- Y")
+            else                                 do log.debug("  Protected: ---- N")
+            if .VIDEO_DECODE_KHR in p.queueFlags do log.debug("  Vidio Decode: - Y")
+            else                                 do log.debug("  Vidio Decode: - N")
+            if .OPTICAL_FLOW_NV in p.queueFlags  do log.debug("  Optical Flow: - Y")
+            else                                 do log.debug("  Optical Flow: - N")
+            log.debug("  max queues", p.queueCount)
         }
 
-        fmt.println("Selected Graphics Family Index:", graphics_index)
-        fmt.println("Selected Compute Family Index: ", compute_index)
-        fmt.println("Selected Transfer Family Index:", transfer_index)
+        log.debug("Selected Graphics Family Index:", graphics_index)
+        log.debug("Selected Compute Family Index: ", compute_index)
+        log.debug("Selected Transfer Family Index:", transfer_index)
     }
 
     // create logical device
@@ -256,7 +256,7 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
 
         result := vk.CreateDevice(physical_device, &device_info, nil, &device)
         if result != .SUCCESS {
-            fmt.eprintln("failed to create vulkan device:", reflect.enum_string(result))
+            log.error("failed to create vulkan device:", reflect.enum_string(result))
             return
         }
     }
