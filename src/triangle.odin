@@ -15,28 +15,38 @@ DEVICE_EXTENSIONS: []cstring = {
     "VK_KHR_swapchain",
 }
 
-Vulkan_Data :: struct {
-    instance: vk.Instance,
-    device:   vk.Device,
+Vulkan_Context :: struct {
+    instance:        vk.Instance,
+    physical_device: vk.PhysicalDevice,
+    device:          vk.Device,
+    surface_format:  vk.SurfaceFormatKHR,
     indices:  struct {
         graphics:             u32,
         compute:              u32,
         transfer:             u32,
+        present:              u32,
         specialized_compute:  b8,
         specialized_transfer: b8,
     }
 }
 
 Vulkan_Window_Data :: struct {
-    window: glfw.WindowHandle,
-    surface: vk.SurfaceKHR,
+    window:    glfw.WindowHandle,
+    surface:   vk.SurfaceKHR,
+    swapchain: vk.SwapchainKHR,
+    img_views: []vk.ImageView,
 }
 
-Swapchain :: struct {
-    handle: vk.SwapchainKHR,
+@(private="file")
+check_result :: #force_inline proc(r: vk.Result, err_msg: string, location := #caller_location) -> (ok: bool) {
+    if r != .SUCCESS {
+        log.error(err_msg, "err =", reflect.enum_string(r))
+        return false
+    }
+    return true
 }
 
-vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
+vulkan_data_init :: proc(vk_ctx: ^Vulkan_Context) -> (ok: bool) {
     get_proc_address :: proc(p: rawptr, name: cstring) {
 		(cast(^rawptr)p)^ = glfw.GetInstanceProcAddress((^vk.Instance)(context.user_ptr)^, name)
 	}
@@ -72,16 +82,29 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         }
 
         result := vk.CreateInstance(&instance_info, nil, &instance)
-        if result != .SUCCESS {
-            log.error("failed to create vulkan instance:", reflect.enum_string(result))
-            return false
-        }
+        check_result(result, "failed to create instance") or_return
 	    vk.load_proc_addresses(instance)
     }
     defer if !ok {
         vk.DestroyInstance(instance, nil)
     }
     log.debug("created instance")
+
+    // create dummy window for surface creation
+    dummy_window := glfw.CreateWindow(1, 1, "", nil, nil)
+    if dummy_window == nil {
+        log.error("failed to create dummy window")
+        return false
+    }
+    defer glfw.DestroyWindow(dummy_window)
+
+    // create vulkan surface
+    surface: vk.SurfaceKHR
+    {
+        result := glfw.CreateWindowSurface(instance, dummy_window, nil, &surface)
+        check_result(result, "failed to create dummy window surface") or_return
+    }
+    defer vk.DestroySurfaceKHR(instance, surface, nil)
 
     // select physical device
     physical_device: vk.PhysicalDevice
@@ -102,10 +125,16 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             
             // check extensions
             extension_count: u32
-            vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, nil)
+            result := vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, nil)
+            check_result(result, "failed to enumerate device extension properties") or_return
             extensions := make([]vk.ExtensionProperties, extension_count, arena_allocator)
+            if extensions == nil {
+                log.error("failed to allocate extensions array")
+                return false
+            }
             defer delete(extensions, arena_allocator)
-            vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, raw_data(extensions))
+            result = vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, raw_data(extensions))
+            check_result(result, "failed to enumerate device extension properties") or_return
             
             loop: for re in DEVICE_EXTENSIONS {
                 for &e in extensions {
@@ -159,8 +188,32 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         log.debug("selected physical device:", cast(cstring)cast(rawptr)&selected_properties.deviceName)
     }
 
+    // select surface format from supported format
+    surface_format: vk.SurfaceFormatKHR
+    {
+        format_count: u32
+        result := vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &format_count, nil)
+        check_result(result, "failed to get device surface formats") or_return
+        formats := make([]vk.SurfaceFormatKHR, format_count, arena_allocator)
+        defer delete(formats, arena_allocator)
+        if formats == nil {
+            log.error("failed to create surface formats array")
+            return false
+        }
+        result = vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &format_count, raw_data(formats))
+        check_result(result, "failed to get device surface formats") or_return
+
+        surface_format = formats[0]
+        for fmt in formats {
+            if fmt.format == .B8G8R8A8_SRGB && fmt.colorSpace == .COLORSPACE_SRGB_NONLINEAR {
+                surface_format = fmt
+                break
+            }
+        }
+    }
+
     // get queue families and select queue family indices
-    graphics_index, compute_index, transfer_index: i32 = -1, -1, -1
+    graphics_index, compute_index, transfer_index, present_index: i32 = -1, -1, -1, -1
     specialized_transfer, specialized_compute: b8
     {
         queue_family_properties: []vk.QueueFamilyProperties
@@ -171,9 +224,12 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, raw_data(queue_family_properties))
 
         for f, i in queue_family_properties {
+            present_support: b32
+            vk.GetPhysicalDeviceSurfaceSupportKHR(physical_device, cast(u32)i, surface, &present_support)
             if graphics_index == -1 && .GRAPHICS in f.queueFlags do graphics_index = cast(i32)i
             if compute_index  == -1 && .COMPUTE  in f.queueFlags do compute_index  = cast(i32)i
             if transfer_index == -1 && .TRANSFER in f.queueFlags do transfer_index = cast(i32)i
+            if present_index  == -1 && present_support == true   do present_index  = cast(i32)i
             
             if .TRANSFER in f.queueFlags && transmute(i32)f.queueFlags < transmute(i32)queue_family_properties[transfer_index].queueFlags {
                 transfer_index = cast(i32)i
@@ -188,6 +244,9 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         specialized_transfer = transfer_index != graphics_index && transfer_index != compute_index
 
         for p, i in queue_family_properties {
+            present_support: b32
+            vk.GetPhysicalDeviceSurfaceSupportKHR(physical_device, cast(u32)i, surface, &present_support)
+
             log.debug("queue family:", i)
             if .GRAPHICS in p.queueFlags         do log.debug("  Graphics: ----- Y")
             else                                 do log.debug("  Graphics: ----- N")
@@ -197,6 +256,8 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
             else                                 do log.debug("  Compute: ------ N")
             if .SPARSE_BINDING in p.queueFlags   do log.debug("  Sparse Binding: Y")
             else                                 do log.debug("  Sparse Binding: N")
+            if present_support                   do log.debug("  Present: ------ Y")
+            else                                 do log.debug("  Present: ------ N")
             if .PROTECTED in p.queueFlags        do log.debug("  Protected: ---- Y")
             else                                 do log.debug("  Protected: ---- N")
             if .VIDEO_DECODE_KHR in p.queueFlags do log.debug("  Vidio Decode: - Y")
@@ -255,35 +316,146 @@ vulkan_data_init :: proc(vk_data: ^Vulkan_Data) -> (ok: bool) {
         }
 
         result := vk.CreateDevice(physical_device, &device_info, nil, &device)
-        if result != .SUCCESS {
-            log.error("failed to create vulkan device:", reflect.enum_string(result))
-            return
-        }
+        check_result(result, "failed to create vulkan device") or_return
     }
     defer if !ok {
         vk.DestroyDevice(device, nil)
     }
+    log.debug("created logical device")
 
-    vk_data.instance         = instance
-    vk_data.device           = device
-    vk_data.indices.graphics = transmute(u32)graphics_index
-    vk_data.indices.compute  = transmute(u32)compute_index
-    vk_data.indices.transfer = transmute(u32)transfer_index
-    vk_data.indices.specialized_compute  = specialized_compute
-    vk_data.indices.specialized_transfer = specialized_transfer
+    vk_ctx.instance         = instance
+    vk_ctx.physical_device   = physical_device
+    vk_ctx.device           = device
+    vk_ctx.surface_format   = surface_format
+    vk_ctx.indices.graphics = transmute(u32)graphics_index
+    vk_ctx.indices.compute  = transmute(u32)compute_index
+    vk_ctx.indices.transfer = transmute(u32)transfer_index
+    vk_ctx.indices.specialized_compute  = specialized_compute
+    vk_ctx.indices.specialized_transfer = specialized_transfer
     return true
 }
 
-vulkan_data_destroy :: proc(data: ^Vulkan_Data) {
+vulkan_data_destroy :: proc(data: ^Vulkan_Context) {
     defer data^ = {}
     vk.DestroyDevice(data.device, nil)
     vk.DestroyInstance(data.instance, nil)
 }
 
-vulkan_swapchain_init :: proc(window: glfw.WindowHandle, swapchain: ^Swapchain) {
+create_swapchain :: proc(vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle, surface: vk.SurfaceKHR, old: vk.SwapchainKHR = 0) -> (swapchain: vk.SwapchainKHR, ok: bool) {
+    surface_capabilities: vk.SurfaceCapabilitiesKHR
+    {
+
+        result := vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vk_ctx.physical_device, surface, &surface_capabilities)
+        check_result(result, "failed to get device surface capabilites") or_return
+    }
+
+    image_count: u32
+    extent: vk.Extent2D
+    queue_indices := []u32 { vk_ctx.indices.graphics, vk_ctx.indices.present }
+
+    image_count = surface_capabilities.minImageCount + 1
+    if surface_capabilities.maxImageCount > 0 do image_count = min(image_count, surface_capabilities.maxImageCount)
+
+    min_extent_width  := surface_capabilities.minImageExtent.width
+    min_extent_height := surface_capabilities.minImageExtent.height
+    max_extent_width  := surface_capabilities.maxImageExtent.width
+    max_extent_height := surface_capabilities.maxImageExtent.height
+
+    framebuffer_x, framebuffer_y := glfw.GetFramebufferSize(window)
+    extent.width  = clamp(transmute(u32)framebuffer_x, min_extent_width, max_extent_width)
+    extent.height = clamp(transmute(u32)framebuffer_y, min_extent_height, max_extent_height)
+
+    is_concurrent := vk_ctx.indices.graphics != vk_ctx.indices.present
+    swapchain_info := vk.SwapchainCreateInfoKHR {
+        sType                 = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface               = surface,
+        minImageCount         = image_count,
+        imageFormat           = vk_ctx.surface_format.format,
+        imageColorSpace       = vk_ctx.surface_format.colorSpace,
+        imageExtent           = extent,
+        imageArrayLayers      = 1,
+        imageUsage            = { .COLOR_ATTACHMENT },
+        imageSharingMode      = .CONCURRENT if is_concurrent else .EXCLUSIVE,
+        queueFamilyIndexCount = cast(u32)len(queue_indices) if is_concurrent else 0,
+        pQueueFamilyIndices   = raw_data(queue_indices),
+        preTransform          = surface_capabilities.currentTransform,
+        compositeAlpha        = { .OPAQUE },
+        presentMode           = .FIFO,
+        clipped               = true,
+    }
+
+    result := vk.CreateSwapchainKHR(vk_ctx.device, &swapchain_info, nil, &swapchain)
+    check_result(result, "failed to create swapchain") or_return
+    
+    log.debug("created swapchain")
+    return swapchain, true
 }
 
-vulkan_swapchain_destroy :: proc(swapchain: ^Swapchain) {
+vulkan_window_data_init :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) -> (ok: bool) {
+    arena_buffer: [2048]u8 = ---
+    arena: mem.Arena
+    mem.arena_init(&arena, arena_buffer[:])
+    arena_allocator := mem.arena_allocator(&arena)
 
+    // create surface
+    surface: vk.SurfaceKHR
+    {
+        result := glfw.CreateWindowSurface(vk_ctx.instance, window, nil, &surface)
+        check_result(result, "failed to create window surfacd") or_return
+    }
+
+    // make sure surface supports the format specified in vk_ctx
+    {
+        format_count: u32
+        result := vk.GetPhysicalDeviceSurfaceFormatsKHR(vk_ctx.physical_device, surface, &format_count, nil)
+        check_result(result, "failed to get device surface formats") or_return
+        formats := make([]vk.SurfaceFormatKHR, format_count, arena_allocator)
+        defer delete(formats, arena_allocator)
+        if formats == nil {
+            log.error("failed to create surface formats array")
+            return false
+        }
+        result = vk.GetPhysicalDeviceSurfaceFormatsKHR(vk_ctx.physical_device, surface, &format_count, raw_data(formats))
+        check_result(result, "failed to get device surface formats") or_return
+
+        format_found: bool = false
+        for fmt in formats {
+            if fmt == vk_ctx.surface_format {
+                format_found = true
+                break
+            }
+        }
+        if !format_found {
+            log.error("no suitable surface format found")
+            return false
+        }
+    }
+
+    swapchain := create_swapchain(vk_ctx, window, surface) or_return
+
+    // create swapchain image views
+    {
+    }
+    // create synchronization objects
+    {
+    }
+
+    data.window    = window
+    data.surface   = surface
+    data.swapchain = swapchain
+    return true
 }
 
+vulkan_window_data_destroy :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Context) {
+    assert(data != nil && vk_ctx != nil)
+    defer data^ = {}
+
+    vk.DestroySwapchainKHR(vk_ctx.device, data.swapchain, nil)
+    vk.DestroySurfaceKHR(vk_ctx.instance, data.surface, nil)
+}
+
+vulkan_window_data_update :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Context) -> (ok: bool) {
+    // todo: Check if swapchain needs to be recreated
+    swapchain := create_swapchain(vk_ctx, data.window, data.surface, data.swapchain) or_return
+    return true
+}

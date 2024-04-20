@@ -13,8 +13,17 @@ main :: proc() {
         log.fatal("failed to init glfw")
         return
     }
+    glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
     log.debug("initialized glfw")
     defer glfw.Terminate()
+
+    vk_ctx: Vulkan_Context
+    if !vulkan_data_init(&vk_ctx) {
+        log.fatal("failed to init vulkan data")
+        return
+    }
+    defer vulkan_data_destroy(&vk_ctx)
+    log.debug("initialized vulkan data")
 
     window := glfw.CreateWindow(512, 512, "vulkan triangle", nil, nil)
     if window == nil {
@@ -24,14 +33,12 @@ main :: proc() {
     log.debug("created window")
     defer glfw.DestroyWindow(window)
 
-    vk_data: Vulkan_Data
-    if !vulkan_data_init(&vk_data) {
-        log.fatal("failed to init vulkan data")
+    window_data: Vulkan_Window_Data
+    if !vulkan_window_data_init(&window_data, &vk_ctx, window) {
+        log.fatal("failed to init vulkan window data")
         return
     }
-    defer vulkan_data_destroy(&vk_data)
-
-    log.debug("initialized vulkan data")
+    defer vulkan_window_data_destroy(&window_data, &vk_ctx)
 
     log.info("initialization complete")
 
