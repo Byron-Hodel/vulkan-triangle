@@ -34,7 +34,8 @@ Vulkan_Window_Data :: struct {
     window:    glfw.WindowHandle,
     surface:   vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
-    img_views: []vk.ImageView,
+    images:    []vk.Image,
+    image_views: []vk.ImageView,
 }
 
 @(private="file")
@@ -433,16 +434,51 @@ vulkan_window_data_init :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Conte
 
     swapchain := create_swapchain(vk_ctx, window, surface) or_return
 
-    // create swapchain image views
+    // get images and create image views
+    images: []vk.Image
+    image_views: []vk.ImageView
     {
-    }
-    // create synchronization objects
-    {
+        image_count: u32
+        result := vk.GetSwapchainImagesKHR(vk_ctx.device, swapchain, &image_count, nil)
+        check_result(result, "failed to get swapchain images")
+        images = make([]vk.Image, image_count)
+        image_views = make([]vk.ImageView, image_count)
+        if images == nil || image_views == nil {
+            log.error("failed to make swapchain image array or image view array")
+            return false
+        }
+        result = vk.GetSwapchainImagesKHR(vk_ctx.device, swapchain, &image_count, raw_data(images))
+        check_result(result, "failed to get swapchain images")
+
+        for img, i in images {
+            view_info := vk.ImageViewCreateInfo {
+                sType    = .IMAGE_VIEW_CREATE_INFO,
+                image    = img,
+                viewType = .D2,
+                format   = vk_ctx.surface_format.format,
+                components = {
+                    r = .IDENTITY,
+                    g = .IDENTITY,
+                    b = .IDENTITY,
+                },
+                subresourceRange   = {
+                    aspectMask     = { .COLOR },
+                    baseMipLevel   = 0,
+                    levelCount     = 1,
+                    baseArrayLayer = 0,
+                    layerCount     = 1,
+                },
+            }
+            result := vk.CreateImageView(vk_ctx.device, &view_info, nil, &image_views[i])
+            check_result(result, "failed to create swapchain image view")
+        }
     }
 
-    data.window    = window
-    data.surface   = surface
-    data.swapchain = swapchain
+    data.window      = window
+    data.surface     = surface
+    data.swapchain   = swapchain
+    data.images      = images
+    data.image_views = image_views
     return true
 }
 
@@ -450,12 +486,20 @@ vulkan_window_data_destroy :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Co
     assert(data != nil && vk_ctx != nil)
     defer data^ = {}
 
+    for iv in data.image_views {
+        vk.DestroyImageView(vk_ctx.device, iv, nil)
+    }
+
     vk.DestroySwapchainKHR(vk_ctx.device, data.swapchain, nil)
     vk.DestroySurfaceKHR(vk_ctx.instance, data.surface, nil)
 }
 
 vulkan_window_data_update :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Context) -> (ok: bool) {
     // todo: Check if swapchain needs to be recreated
-    swapchain := create_swapchain(vk_ctx, data.window, data.surface, data.swapchain) or_return
+    //swapchain := create_swapchain(vk_ctx, data.window, data.surface, data.swapchain) or_return
     return true
+}
+
+draw_triangle :: proc(vk_ctx: ^Vulkan_Context, wnd_data: ^Vulkan_Window_Data) {
+
 }
