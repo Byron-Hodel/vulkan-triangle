@@ -1,6 +1,7 @@
 package main
 
 import "core:log"
+import "core:os"
 import "core:math/linalg/glsl"
 import "core:mem"
 import "core:reflect"
@@ -36,6 +37,56 @@ Vulkan_Window_Data :: struct {
     swapchain: vk.SwapchainKHR,
     images:    []vk.Image,
     image_views: []vk.ImageView,
+}
+
+Data_Type :: enum u8 {
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    F32,
+    F64,
+}
+
+format_table := [Data_Type][4]vk.Format {
+   .I8  = [4]vk.Format { .R8_SINT, .R8G8_SINT, .R8G8B8_SINT, .R8G8B8A8_SINT },
+   .U8  = [4]vk.Format { .R8_UINT, .R8G8_UINT, .R8G8B8_UINT, .R8G8B8A8_UINT },
+   .I16 = [4]vk.Format { .R16_SINT, .R16G16_SINT, .R16G16B16_SINT, .R16G16B16A16_SINT },
+   .U16 = [4]vk.Format { .R16_UINT, .R16G16_UINT, .R16G16B16_UINT, .R16G16B16A16_UINT },
+   .I32 = [4]vk.Format { .R32_SINT, .R32G32_SINT, .R32G32B32_SINT, .R32G32B32A32_SINT },
+   .U32 = [4]vk.Format { .R32_UINT, .R32G32_UINT, .R32G32B32_UINT, .R32G32B32A32_UINT },
+   .I64 = [4]vk.Format { .R64_SINT, .R64G64_SINT, .R64G64B64_SINT, .R64G64B64A64_SINT },
+   .U64 = [4]vk.Format { .R64_UINT, .R64G64_UINT, .R64G64B64_UINT, .R64G64B64A64_UINT },
+   .F32 = [4]vk.Format { .R32_SFLOAT, .R32G32_SFLOAT, .R32G32B32_SFLOAT, .R32G32B32A32_SFLOAT },
+   .F64 = [4]vk.Format { .R64_SFLOAT, .R64G64_SFLOAT, .R64G64B64_SFLOAT, .R64G64B64A64_SFLOAT },
+}
+
+
+Vertex_Attribute :: struct {
+    location:   u32,       // the attribute location
+    components: u32,       // represents the number of vector components
+    data_fmt:   Data_Type, // the data format of each component
+}
+
+// I see no reason why there would be more than 16 attributes
+// in a single vertex buffer
+MAX_ATTRIBUTES :: 16
+Vertex_Binding :: struct {
+    binding:      u32,                              // the binding of the vertex buffer
+    attribs:      [MAX_ATTRIBUTES]Vertex_Attribute, // buffer attributes
+    attrib_count: u32,
+}
+
+// why would anyone bind more than 8 vertex buffers
+MAX_VERTEX_BINDINGS :: 8
+Shader_Pipeline :: struct {
+    handle:             vk.Pipeline,
+    vert_bindings:      [MAX_VERTEX_BINDINGS]Vertex_Binding,
+    vert_binding_count: u32
 }
 
 @(private="file")
@@ -113,17 +164,6 @@ vulkan_data_init :: proc(vk_ctx: ^Vulkan_Context) -> (ok: bool) {
         is_device_suitable :: proc(d: vk.PhysicalDevice, arena: ^mem.Arena) -> b32 {
             arena_allocator := mem.arena_allocator(arena)
 
-            indexing_features := vk.PhysicalDeviceDescriptorIndexingFeatures {
-                sType = .PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
-            }
-            features := vk.PhysicalDeviceFeatures2 {
-                sType = .PHYSICAL_DEVICE_FEATURES_2,
-                pNext = &indexing_features,
-            }
-            vk.GetPhysicalDeviceFeatures2(d, &features)
-
-            bindless_supported: b32 = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray
-            
             // check extensions
             extension_count: u32
             result := vk.EnumerateDeviceExtensionProperties(d, nil, &extension_count, nil)
@@ -146,8 +186,7 @@ vulkan_data_init :: proc(vk_ctx: ^Vulkan_Context) -> (ok: bool) {
                 }
 
             }
-
-            return bindless_supported
+            return true
         }
 
         device_count: u32
@@ -241,6 +280,11 @@ vulkan_data_init :: proc(vk_ctx: ^Vulkan_Context) -> (ok: bool) {
             }
         }
 
+        if graphics_index == -1 || transfer_index == -1 || present_index == -1 {
+            log.error("failed to find supported queue family")
+            return false
+        }
+
         specialized_compute  = compute_index  != graphics_index && compute_index  != transfer_index
         specialized_transfer = transfer_index != graphics_index && transfer_index != compute_index
 
@@ -259,15 +303,8 @@ vulkan_data_init :: proc(vk_ctx: ^Vulkan_Context) -> (ok: bool) {
             else                                 do log.debug("  Sparse Binding: N")
             if present_support                   do log.debug("  Present: ------ Y")
             else                                 do log.debug("  Present: ------ N")
-            if .PROTECTED in p.queueFlags        do log.debug("  Protected: ---- Y")
-            else                                 do log.debug("  Protected: ---- N")
-            if .VIDEO_DECODE_KHR in p.queueFlags do log.debug("  Vidio Decode: - Y")
-            else                                 do log.debug("  Vidio Decode: - N")
-            if .OPTICAL_FLOW_NV in p.queueFlags  do log.debug("  Optical Flow: - Y")
-            else                                 do log.debug("  Optical Flow: - N")
             log.debug("  max queues", p.queueCount)
         }
-
         log.debug("Selected Graphics Family Index:", graphics_index)
         log.debug("Selected Compute Family Index: ", compute_index)
         log.debug("Selected Transfer Family Index:", transfer_index)
@@ -345,7 +382,6 @@ vulkan_data_destroy :: proc(data: ^Vulkan_Context) {
 create_swapchain :: proc(vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle, surface: vk.SurfaceKHR, old: vk.SwapchainKHR = 0) -> (swapchain: vk.SwapchainKHR, ok: bool) {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     {
-
         result := vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vk_ctx.physical_device, surface, &surface_capabilities)
         check_result(result, "failed to get device surface capabilites") or_return
     }
@@ -498,6 +534,65 @@ vulkan_window_data_update :: proc(data: ^Vulkan_Window_Data, vk_ctx: ^Vulkan_Con
     // todo: Check if swapchain needs to be recreated
     //swapchain := create_swapchain(vk_ctx, data.window, data.surface, data.swapchain) or_return
     return true
+}
+
+shader_pipeline_load_file :: proc(vk_ctx: ^Vulkan_Context, vert_path: string, frag_path: string) -> (pipeline: Shader_Pipeline, ok: bool) {
+    create_shader_module :: proc(vk_ctx: ^Vulkan_Context, src: []u8) -> (module: vk.ShaderModule, ok: bool) {
+        module_info := vk.ShaderModuleCreateInfo {
+            sType    = .SHADER_MODULE_CREATE_INFO,
+            codeSize = len(src),
+            pCode    = transmute([^]u32)raw_data(src),
+        }
+        result := vk.CreateShaderModule(vk_ctx.device, &module_info, nil, &module)
+        check_result(result, "failed to create shader module")
+        ok = true
+        return
+    }
+    vert_src := os.read_entire_file(vert_path) or_return
+    frag_src := os.read_entire_file(frag_path) or_return
+    vert_mod := create_shader_module(vk_ctx, vert_src) or_return
+    frag_mod := create_shader_module(vk_ctx, frag_src) or_return
+    defer vk.DestroyShaderModule(vk_ctx.device, vert_mod, nil)
+    defer vk.DestroyShaderModule(vk_ctx.device, frag_mod, nil)
+
+    stage_count: u32 = 2
+    
+    vert_stage_info := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = { .VERTEX },
+        module = vert_mod,
+        pName  = "main",
+    }
+
+    frag_stage_info := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = { .FRAGMENT },
+        module = frag_mod,
+        pName  = "main",
+    }
+
+    MAX_STAGES :: 5
+    stages := []vk.PipelineShaderStageCreateInfo {
+        vert_stage_info,
+        frag_stage_info,
+    }
+
+    vert_input_state := vk.PipelineVertexInputStateCreateInfo {
+        sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        
+    }
+
+    pipeline_info := vk.GraphicsPipelineCreateInfo {
+        sType             = .GRAPHICS_PIPELINE_CREATE_INFO,
+        stageCount        = stage_count,
+        pStages           = raw_data(stages),
+        pVertexInputState = &vert_input_state,
+    }
+
+    
+
+    ok = true
+    return
 }
 
 draw_triangle :: proc(vk_ctx: ^Vulkan_Context, wnd_data: ^Vulkan_Window_Data) {
